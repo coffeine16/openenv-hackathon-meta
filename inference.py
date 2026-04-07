@@ -8,13 +8,13 @@ LOCAL USAGE (no Docker — start the server first in a separate terminal):
     uvicorn server.app:app --host 0.0.0.0 --port 8000
 
     Then in another terminal:
-    USE_DOCKER=false API_BASE_URL=https://api.openai.com/v1 MODEL_NAME=gpt-4o HF_TOKEN=sk-... python inference.py
+    USE_DOCKER=false HF_TOKEN=hf_... python inference.py
 
 SINGLE TASK (local):
     FITSCRIPT_TASK=basic_plan USE_DOCKER=false python inference.py
 
 DOCKER USAGE (spins up the container automatically):
-    USE_DOCKER=true LOCAL_IMAGE_NAME=fitscript-env:latest API_BASE_URL=... MODEL_NAME=... HF_TOKEN=... python inference.py
+    USE_DOCKER=true LOCAL_IMAGE_NAME=fitscript-env:latest HF_TOKEN=hf_... python inference.py
 
 STDOUT FORMAT (exact hackathon spec):
     [START] task=<task> env=fitscript_env model=<model>
@@ -38,13 +38,12 @@ except ImportError:
 # Configuration (hackathon mandatory variables)
 # ---------------------------------------------------------------------------
 API_BASE_URL: str = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME: str = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+MODEL_NAME: str = os.environ.get("MODEL_NAME", "meta-llama/Meta-Llama-3-8B-Instruct")
+# Accept HF_TOKEN or API_KEY
 API_KEY: str = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY", "")
 
 BENCHMARK: str = "fitscript_env"
 
-# USE_DOCKER=false → connect to a local server already running (default for local dev)
-# USE_DOCKER=true  → spin up a Docker container automatically
 USE_DOCKER: bool = os.environ.get("USE_DOCKER", "false").lower() == "true"
 
 IMAGE_NAME: str = (
@@ -54,8 +53,6 @@ IMAGE_NAME: str = (
 
 LOCAL_SERVER_URL: str = os.environ.get("LOCAL_SERVER_URL", "http://localhost:8000")
 
-# FITSCRIPT_TASK: set to a single task name to run only that task.
-# Leave empty (default) to run all 3 tasks sequentially (required for hackathon).
 FITSCRIPT_TASK: str = os.environ.get("FITSCRIPT_TASK", "")
 
 MAX_STEPS: int = int(os.environ.get("MAX_STEPS", "8"))
@@ -132,40 +129,41 @@ For a periodized 4-week powerlifting program, use:
 """
 
 # ---------------------------------------------------------------------------
-# LLM helpers
+# LLM helpers — using OpenAI-compatible HuggingFace router
 # ---------------------------------------------------------------------------
 
 def _call_llm_sync(messages: list) -> str:
-    """Synchronous Hugging Face call"""
-    from huggingface_hub import InferenceClient
-    import os
+    """
+    Call HuggingFace Inference API via its OpenAI-compatible /v1/chat/completions
+    endpoint. Works with any model available on HF's serverless inference router.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise ImportError(
+            "openai package is required. Install with: pip install openai"
+        )
 
-    client = InferenceClient(
-        model=os.getenv("MODEL_NAME"),
-        token=os.getenv("HF_API_KEY")
+    if not API_KEY:
+        raise ValueError(
+            "HF_TOKEN (or API_KEY) environment variable is not set. "
+            "Get your token from https://huggingface.co/settings/tokens"
+        )
+
+    client = OpenAI(
+        base_url=API_BASE_URL,
+        api_key=API_KEY,
     )
 
-    # Convert OpenAI-style messages → single prompt
-    prompt = ""
-    for m in messages:
-        role = m.get("role", "")
-        content = m.get("content", "")
-        if role == "system":
-            prompt += f"[SYSTEM]: {content}\n"
-        elif role == "user":
-            prompt += f"[USER]: {content}\n"
-        elif role == "assistant":
-            prompt += f"[ASSISTANT]: {content}\n"
-
-    prompt += "[ASSISTANT]:"
-
-    response = client.text_generation(
-        prompt,
-        max_new_tokens=2048,
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=2048,
         temperature=0.7,
     )
 
-    return response
+    return response.choices[0].message.content
+
 
 async def call_llm_async(messages: list) -> str:
     loop = asyncio.get_event_loop()
@@ -219,7 +217,6 @@ async def run_episode(task_name: str, env) -> None:
     error_msg     = None
 
     try:
-        # reset() is async in EnvClient
         reset_result = await env.reset()
         obs = reset_result.observation
 
@@ -243,7 +240,6 @@ async def run_episode(task_name: str, env) -> None:
             action_type = "modify_plan" if task_name == "injury_safe_modification" else "generate_plan"
             action      = FitscriptAction(action_type=action_type, plan=plan_str)
 
-            # step() is async in EnvClient
             try:
                 result = await env.step(action)
             except Exception as exc:
@@ -281,23 +277,17 @@ async def main() -> None:
     tasks_to_run = [FITSCRIPT_TASK] if FITSCRIPT_TASK else ALL_TASKS
 
     if USE_DOCKER:
-        # Docker mode: launch one container per task.
-        # FITSCRIPT_TASK env var is passed into the container so the server
-        # initialises with the correct task_id.
         for task_name in tasks_to_run:
             print(
                 f"[INFO] Starting Docker container ({IMAGE_NAME}) for task={task_name}",
                 file=sys.stderr, flush=True,
             )
-            # from_docker_image is async and returns a connected EnvClient
             try:
                 env = await FitscriptEnv.from_docker_image(
                     IMAGE_NAME,
                     env={"FITSCRIPT_TASK": task_name},
                 )
             except TypeError:
-                # Some versions of EnvClient don't support the env= kwarg;
-                # fall back to no extra env (server uses its own FITSCRIPT_TASK)
                 env = await FitscriptEnv.from_docker_image(IMAGE_NAME)
             try:
                 await run_episode(task_name, env)
@@ -305,9 +295,6 @@ async def main() -> None:
                 await env.close()
 
     else:
-        # Local mode: server must already be running at LOCAL_SERVER_URL.
-        # Each task gets a fresh client connection (the server keeps its state
-        # per-session via WebSocket, so reconnecting is a clean reset).
         for task_name in tasks_to_run:
             print(
                 f"[INFO] Connecting to local server at {LOCAL_SERVER_URL} for task={task_name}",
@@ -317,7 +304,11 @@ async def main() -> None:
             try:
                 await run_episode(task_name, env)
             finally:
-                env.close()
+                # close() is async — await it properly
+                try:
+                    await env.close()
+                except TypeError:
+                    env.close()
 
 
 if __name__ == "__main__":
