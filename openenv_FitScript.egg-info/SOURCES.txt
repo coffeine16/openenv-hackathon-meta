@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+./__init__.py
+./client.py
+./inference.py
+./models.py
+openenv_FitScript.egg-info/PKG-INFO
+openenv_FitScript.egg-info/SOURCES.txt
+openenv_FitScript.egg-info/dependency_links.txt
+openenv_FitScript.egg-info/entry_points.txt
+openenv_FitScript.egg-info/requires.txt
+openenv_FitScript.egg-info/top_level.txt
+server/FitScript_environment.py
+server/__init__.py
+server/app.py

@@ -39,7 +39,7 @@ API_KEY: str = os.environ["HF_TOKEN"]
 
 TASK_NAME: str = os.getenv("FITSCRIPT_TASK", "basic_plan")
 BENCHMARK: str = "fitscript_env"
-IMAGE_NAME: str = os.getenv("FITSCRIPT_IMAGE", "FitScript-env:latest")
+IMAGE_NAME: str = os.getenv("FITSCRIPT_IMAGE") or os.getenv("LOCAL_IMAGE_NAME", "FitScript-env:latest")
 MAX_STEPS: int = int(os.getenv("MAX_STEPS", "8"))
 
 # ---------------------------------------------------------------------------
@@ -167,7 +167,12 @@ async def run_episode() -> None:
 
     env = None
     try:
-        env = FitscriptEnv.from_docker_image(IMAGE_NAME)
+        USE_DOCKER = os.getenv("USE_DOCKER", "true").lower() == "true"
+
+        if USE_DOCKER:
+            env = await FitscriptEnv.from_docker_image(IMAGE_NAME)
+        else:
+            env = FitscriptEnv(base_url="http://localhost:8000")
 
         # Reset
         reset_result = env.reset()
@@ -234,7 +239,10 @@ async def run_episode() -> None:
         print(f"[ERROR] {error_msg}", flush=True, file=sys.stderr)
     finally:
         if env is not None:
-            env.close()
+            if USE_DOCKER:
+                await env.close()
+            else:
+                env.close()
 
     log_end(success, step, final_score, rewards)
 
