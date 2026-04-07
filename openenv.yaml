@@ -5,3 +5,18 @@ runtime: fastapi
 app: server.app:app
 port: 8000
 
+tasks:
+  - id: basic_plan
+    name: Basic Workout Plan Generation
+    difficulty: easy
+    description: Generate a 3-day bodyweight beginner plan with no equipment.
+
+  - id: injury_safe_modification
+    name: Injury-Safe Plan Modification
+    difficulty: medium
+    description: Modify a plan to remove lower-back-stressing exercises.
+
+  - id: periodized_program
+    name: Periodized 4-Week Program
+    difficulty: hard
+    description: Design a 4-week periodized powerlifting block with deload week.

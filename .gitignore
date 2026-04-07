@@ -1,0 +1,28 @@
+# 🔐 Secrets
+.env
+*.env
+
+# 🐍 Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 🧪 Virtual environment
+.venv/
+venv/
+env/
+
+# 📦 uv
+uv.lock
+
+# 📝 Logs
+*.log
+
+# 💻 OS files
+.DS_Store
+Thumbs.db
+
+# 🧠 IDEs
+.vscode/
+.idea/

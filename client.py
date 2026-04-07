@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Fitscript Environment Client."""
+"""FitScript Environment Client."""
 
 from typing import Dict
 
@@ -19,27 +19,34 @@ class FitscriptEnv(
     EnvClient[FitscriptAction, FitscriptObservation, State]
 ):
     """
-    Client for the Fitscript Environment.
+    Client for the FitScript Environment.
 
-    This client maintains a persistent WebSocket connection to the environment server,
-    enabling efficient multi-step interactions with lower latency.
+    This client maintains a persistent WebSocket connection to the environment
+    server, enabling efficient multi-step interactions with lower latency.
     Each client instance has its own dedicated environment session on the server.
 
     Example:
         >>> # Connect to a running server
         >>> with FitscriptEnv(base_url="http://localhost:8000") as client:
         ...     result = client.reset()
-        ...     print(result.observation.echoed_message)
+        ...     print(result.observation.client_profile)
         ...
-        ...     result = client.step(FitscriptAction(message="Hello!"))
-        ...     print(result.observation.echoed_message)
+        ...     result = client.step(FitscriptAction(
+        ...         action_type="generate_plan",
+        ...         plan='{"days": [...]}',
+        ...         reasoning="Beginner-safe bodyweight plan"
+        ...     ))
+        ...     print(result.observation.feedback)
+        ...     print(result.reward)
 
     Example with Docker:
-        >>> # Automatically start container and connect
         >>> client = FitscriptEnv.from_docker_image("FitScript-env:latest")
         >>> try:
         ...     result = client.reset()
-        ...     result = client.step(FitscriptAction(message="Test"))
+        ...     result = client.step(FitscriptAction(
+        ...         action_type="generate_plan",
+        ...         plan='{"days": [...]}'
+        ...     ))
         ... finally:
         ...     client.close()
     """
@@ -54,9 +61,13 @@ class FitscriptEnv(
         Returns:
             Dictionary representation suitable for JSON encoding
         """
-        return {
-            "message": action.message,
+        payload = {
+            "action_type": action.action_type,
+            "plan": action.plan,
         }
+        if action.reasoning is not None:
+            payload["reasoning"] = action.reasoning
+        return payload
 
     def _parse_result(self, payload: Dict) -> StepResult[FitscriptObservation]:
         """
@@ -70,8 +81,11 @@ class FitscriptEnv(
         """
         obs_data = payload.get("observation", {})
         observation = FitscriptObservation(
-            echoed_message=obs_data.get("echoed_message", ""),
-            message_length=obs_data.get("message_length", 0),
+            client_profile=obs_data.get("client_profile", {}),
+            feedback=obs_data.get("feedback", ""),
+            score_breakdown=obs_data.get("score_breakdown", {}),
+            task_id=obs_data.get("task_id", ""),
+            step_count=obs_data.get("step_count", 0),
             done=payload.get("done", False),
             reward=payload.get("reward"),
             metadata=obs_data.get("metadata", {}),
