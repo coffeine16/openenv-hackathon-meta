@@ -1,22 +1,25 @@
 """
-FitScript inference.py --- required entry point for hackathon evaluation.
+FitScript inference.py — required entry point for hackathon evaluation.
 
-Usage:
-    FITSCRIPT_TASK=basic_plan \\
-    API_BASE_URL=https://api.openai.com/v1 \\
-    MODEL_NAME=gpt-4o \\
-    HF_TOKEN=<your_key> \\
-    python inference.py
+Runs all 3 tasks sequentially and emits structured stdout logs per spec.
 
-Supported FITSCRIPT_TASK values:
-    basic_plan               (easy)
-    injury_safe_modification (medium)
-    periodized_program       (hard)
+LOCAL USAGE (no Docker — start the server first in a separate terminal):
+    cd FitScript
+    uvicorn server.app:app --host 0.0.0.0 --port 8000
 
-Output format (stdout, flush=True on every line):
+    Then in another terminal:
+    USE_DOCKER=false API_BASE_URL=https://api.openai.com/v1 MODEL_NAME=gpt-4o HF_TOKEN=sk-... python inference.py
+
+SINGLE TASK (local):
+    FITSCRIPT_TASK=basic_plan USE_DOCKER=false python inference.py
+
+DOCKER USAGE (spins up the container automatically):
+    USE_DOCKER=true LOCAL_IMAGE_NAME=fitscript-env:latest API_BASE_URL=... MODEL_NAME=... HF_TOKEN=... python inference.py
+
+STDOUT FORMAT (exact hackathon spec):
     [START] task=<task> env=fitscript_env model=<model>
-    [STEP]  step=<N> action=<text> reward=<R:.2f> done=<true|false> error=<null|msg>
-    [END]   success=<true|false> steps=<N> score=<S:.3f> rewards=<r1:.2f,...>
+    [STEP] step=<N> action=<text> reward=<R:.2f> done=<true|false> error=<null|msg>
+    [END] success=<true|false> steps=<N> score=<score:.2f> rewards=<r1:.2f,...>
 """
 
 import asyncio
@@ -24,48 +27,64 @@ import json
 import os
 import sys
 
-from openai import OpenAI
+# Optional: load .env for local development
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
 # ---------------------------------------------------------------------------
-# Required environment variables (hackathon spec §5.1)
+# Configuration (hackathon mandatory variables)
 # ---------------------------------------------------------------------------
-API_BASE_URL: str = os.environ["API_BASE_URL"]
-MODEL_NAME: str = os.environ["MODEL_NAME"]
-API_KEY: str = os.environ["HF_TOKEN"]
+API_BASE_URL: str = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME: str = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+API_KEY: str = os.environ.get("HF_TOKEN") or os.environ.get("API_KEY", "")
 
-TASK_NAME: str = os.getenv("FITSCRIPT_TASK", "basic_plan")
 BENCHMARK: str = "fitscript_env"
-IMAGE_NAME: str = os.getenv("FITSCRIPT_IMAGE") or os.getenv("LOCAL_IMAGE_NAME", "FitScript-env:latest")
-MAX_STEPS: int = int(os.getenv("MAX_STEPS", "8"))
+
+# USE_DOCKER=false → connect to a local server already running (default for local dev)
+# USE_DOCKER=true  → spin up a Docker container automatically
+USE_DOCKER: bool = os.environ.get("USE_DOCKER", "false").lower() == "true"
+
+IMAGE_NAME: str = (
+    os.environ.get("LOCAL_IMAGE_NAME")
+    or os.environ.get("FITSCRIPT_IMAGE", "fitscript-env:latest")
+)
+
+LOCAL_SERVER_URL: str = os.environ.get("LOCAL_SERVER_URL", "http://localhost:8000")
+
+# FITSCRIPT_TASK: set to a single task name to run only that task.
+# Leave empty (default) to run all 3 tasks sequentially (required for hackathon).
+FITSCRIPT_TASK: str = os.environ.get("FITSCRIPT_TASK", "")
+
+MAX_STEPS: int = int(os.environ.get("MAX_STEPS", "8"))
+
+ALL_TASKS = ["basic_plan", "injury_safe_modification", "periodized_program"]
 
 # ---------------------------------------------------------------------------
-# Structured log helpers (hackathon spec §5.2)
+# Structured log helpers (exact hackathon spec format — do not change)
 # ---------------------------------------------------------------------------
 
-def log_start(task: str, env: str, model: str) -> None:
-    print(f"[START] task={task} env={env} model={model}", flush=True)
+def log_start(task: str, env_name: str, model: str) -> None:
+    print(f"[START] task={task} env={env_name} model={model}", flush=True)
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error) -> None:
-    err = error if error else "null"
-    # Collapse multiline action text to a single safe token for the log line
-    action_token = action.replace("\n", " ").replace("\r", "")[:120]
+    err_str = str(error) if error else "null"
+    action_str = str(action).replace("\n", " ").replace("\r", "")[:120]
     print(
-        f"[STEP] step={step} action={action_token} reward={reward:.2f}"
-        f" done={str(done).lower()} error={err}",
+        f"[STEP] step={step} action={action_str} reward={reward:.2f}"
+        f" done={str(done).lower()} error={err_str}",
         flush=True,
     )
 
 
 def log_end(success: bool, steps: int, score: float, rewards: list) -> None:
-    r = ",".join(f"{r:.2f}" for r in rewards)
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
         f"[END] success={str(success).lower()} steps={steps}"
-        f" score={score:.3f} rewards={r}",
+        f" score={score:.2f} rewards={rewards_str}",
         flush=True,
     )
 
@@ -77,34 +96,33 @@ def log_end(success: bool, steps: int, score: float, rewards: list) -> None:
 SYSTEM_PROMPT = """You are an expert personal trainer and exercise scientist.
 You will receive a client profile and must generate a structured workout plan as JSON.
 
-Always respond with ONLY a JSON object representing the workout plan.
-Do NOT include any prose or explanation outside the JSON.
+IMPORTANT: Respond with ONLY a valid JSON object. No prose, no markdown fences, no explanation.
 
-JSON schema for a basic/injury plan:
+For a basic plan or injury-modification plan, use:
 {
   "days": [
     {
-      "name": "Day 1 - ...",
-      "focus": "...",
+      "name": "Day 1 - Lower Body",
+      "focus": "legs",
       "exercises": [
-        {"name": "...", "sets": <int>, "reps": <int>, "rest_seconds": <int>}
+        {"name": "Squat", "sets": 3, "reps": 10, "rest_seconds": 60}
       ]
     }
   ]
 }
 
-JSON schema for a periodized 4-week program:
+For a periodized 4-week powerlifting program, use:
 {
   "weeks": [
     {
       "week": 1,
-      "intensity": <float 0-100 representing % 1RM or avg RPE>,
-      "total_sets": <int>,
+      "intensity": 72.5,
+      "total_sets": 80,
       "days": [
         {
-          "name": "Day 1 - ...",
+          "name": "Day 1 - Squat",
           "exercises": [
-            {"name": "...", "sets": <int>, "reps": <int>, "intensity_pct": <float>}
+            {"name": "Back Squat", "sets": 5, "reps": 5, "intensity_pct": 72.5}
           ]
         }
       ]
@@ -113,81 +131,107 @@ JSON schema for a periodized 4-week program:
 }
 """
 
-
 # ---------------------------------------------------------------------------
-# LLM agent call
+# LLM helpers
 # ---------------------------------------------------------------------------
 
-def call_llm(client: OpenAI, messages: list) -> str:
-    """Call the LLM and return the text of the first content block."""
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=0.7,
-        max_tokens=2048,
+def _call_llm_sync(messages: list) -> str:
+    """Synchronous Hugging Face call"""
+    from huggingface_hub import InferenceClient
+    import os
+
+    client = InferenceClient(
+        model=os.getenv("MODEL_NAME"),
+        token=os.getenv("HF_API_KEY")
     )
-    return response.choices[0].message.content or ""
+
+    # Convert OpenAI-style messages → single prompt
+    prompt = ""
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role == "system":
+            prompt += f"[SYSTEM]: {content}\n"
+        elif role == "user":
+            prompt += f"[USER]: {content}\n"
+        elif role == "assistant":
+            prompt += f"[ASSISTANT]: {content}\n"
+
+    prompt += "[ASSISTANT]:"
+
+    response = client.text_generation(
+        prompt,
+        max_new_tokens=2048,
+        temperature=0.7,
+    )
+
+    return response
+
+async def call_llm_async(messages: list) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _call_llm_sync, messages)
 
 
 def build_user_message(observation) -> str:
-    """Build the user turn from an observation object."""
-    profile = observation.client_profile if hasattr(observation, "client_profile") else {}
-    feedback = observation.feedback if hasattr(observation, "feedback") else ""
-    breakdown = observation.score_breakdown if hasattr(observation, "score_breakdown") else {}
-    task_id = observation.task_id if hasattr(observation, "task_id") else ""
+    profile   = getattr(observation, "client_profile",  {})
+    feedback  = getattr(observation, "feedback",         "")
+    breakdown = getattr(observation, "score_breakdown",  {})
+    task_id   = getattr(observation, "task_id",          "")
 
     parts = [
         f"Task: {task_id}",
-        f"Client profile: {json.dumps(profile, indent=2)}",
+        f"Client profile:\n{json.dumps(profile, indent=2)}",
     ]
     if feedback:
         parts.append(f"Environment feedback: {feedback}")
     if breakdown:
         parts.append(f"Score breakdown: {json.dumps(breakdown, indent=2)}")
-    parts.append("Please generate or revise the workout plan as JSON only.")
+    parts.append("Generate or revise the workout plan as a JSON object only.")
     return "\n\n".join(parts)
 
 
+def strip_fences(text: str) -> str:
+    """Remove ```json ... ``` markdown fences if the LLM added them."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = [l for l in text.split("\n") if not l.startswith("```")]
+        text = "\n".join(lines).strip()
+    return text
+
+
 # ---------------------------------------------------------------------------
-# Episode runner
+# Single episode runner
 # ---------------------------------------------------------------------------
 
-async def run_episode() -> None:
-    from FitScript import FitscriptAction, FitscriptEnv  # local import after path is set
+async def run_episode(task_name: str, env) -> None:
+    """
+    Run one episode for task_name against env (an async EnvClient).
+    Emits [START] / [STEP] / [END] to stdout.
+    """
+    from FitScript import FitscriptAction
 
-    llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-
-    log_start(TASK_NAME, BENCHMARK, MODEL_NAME)
+    log_start(task_name, BENCHMARK, MODEL_NAME)
 
     rewards: list = []
-    final_score = 0.0
-    success = False
-    step = 0
-    error_msg = None
+    final_score   = 0.0
+    success       = False
+    step          = 0
+    error_msg     = None
 
-    env = None
     try:
-        USE_DOCKER = os.getenv("USE_DOCKER", "true").lower() == "true"
-
-        if USE_DOCKER:
-            env = await FitscriptEnv.from_docker_image(IMAGE_NAME)
-        else:
-            env = FitscriptEnv(base_url="http://localhost:8000")
-
-        # Reset
-        reset_result = env.reset()
+        # reset() is async in EnvClient
+        reset_result = await env.reset()
         obs = reset_result.observation
 
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
         for step in range(1, MAX_STEPS + 1):
-            # Build user turn from current observation
             user_content = build_user_message(obs)
             messages.append({"role": "user", "content": user_content})
 
-            # Call LLM
+            # LLM call (async-wrapped sync)
             try:
-                assistant_reply = call_llm(llm, messages)
+                assistant_reply = await call_llm_async(messages)
             except Exception as exc:
                 error_msg = str(exc)
                 log_step(step, "LLM_ERROR", 0.0, True, error_msg)
@@ -195,61 +239,86 @@ async def run_episode() -> None:
 
             messages.append({"role": "assistant", "content": assistant_reply})
 
-            # Strip markdown fences if present
-            plan_str = assistant_reply.strip()
-            if plan_str.startswith("```"):
-                lines = plan_str.split("\n")
-                plan_str = "\n".join(
-                    line for line in lines
-                    if not line.startswith("```")
-                ).strip()
+            plan_str    = strip_fences(assistant_reply)
+            action_type = "modify_plan" if task_name == "injury_safe_modification" else "generate_plan"
+            action      = FitscriptAction(action_type=action_type, plan=plan_str)
 
-            # Determine action_type from task
-            if TASK_NAME == "injury_safe_modification":
-                action_type = "modify_plan"
-            elif TASK_NAME == "periodized_program":
-                action_type = "generate_plan"
-            else:
-                action_type = "generate_plan"
-
-            action = FitscriptAction(action_type=action_type, plan=plan_str)
-
-            # Step in environment
+            # step() is async in EnvClient
             try:
-                result = env.step(action)
+                result = await env.step(action)
             except Exception as exc:
                 error_msg = str(exc)
                 log_step(step, action_type, 0.0, True, error_msg)
                 break
 
-            obs = result.observation
-            reward = float(result.reward or 0.0)
-            done = bool(result.done)
+            obs         = result.observation
+            reward      = float(result.reward or 0.0)
+            done        = bool(result.done)
             rewards.append(reward)
-            final_score = reward
+            final_score = max(final_score, reward)
 
             log_step(step, action_type, reward, done, None)
 
             if done:
-                success = reward >= 0.75
                 break
+
+        success = final_score >= 0.75
 
     except Exception as exc:
         error_msg = str(exc)
-        print(f"[ERROR] {error_msg}", flush=True, file=sys.stderr)
-    finally:
-        if env is not None:
-            if USE_DOCKER:
-                await env.close()
-            else:
-                env.close()
+        print(f"[ERROR] episode failed: {error_msg}", file=sys.stderr, flush=True)
 
     log_end(success, step, final_score, rewards)
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Main entry point
 # ---------------------------------------------------------------------------
 
+async def main() -> None:
+    from FitScript import FitscriptEnv
+
+    tasks_to_run = [FITSCRIPT_TASK] if FITSCRIPT_TASK else ALL_TASKS
+
+    if USE_DOCKER:
+        # Docker mode: launch one container per task.
+        # FITSCRIPT_TASK env var is passed into the container so the server
+        # initialises with the correct task_id.
+        for task_name in tasks_to_run:
+            print(
+                f"[INFO] Starting Docker container ({IMAGE_NAME}) for task={task_name}",
+                file=sys.stderr, flush=True,
+            )
+            # from_docker_image is async and returns a connected EnvClient
+            try:
+                env = await FitscriptEnv.from_docker_image(
+                    IMAGE_NAME,
+                    env={"FITSCRIPT_TASK": task_name},
+                )
+            except TypeError:
+                # Some versions of EnvClient don't support the env= kwarg;
+                # fall back to no extra env (server uses its own FITSCRIPT_TASK)
+                env = await FitscriptEnv.from_docker_image(IMAGE_NAME)
+            try:
+                await run_episode(task_name, env)
+            finally:
+                await env.close()
+
+    else:
+        # Local mode: server must already be running at LOCAL_SERVER_URL.
+        # Each task gets a fresh client connection (the server keeps its state
+        # per-session via WebSocket, so reconnecting is a clean reset).
+        for task_name in tasks_to_run:
+            print(
+                f"[INFO] Connecting to local server at {LOCAL_SERVER_URL} for task={task_name}",
+                file=sys.stderr, flush=True,
+            )
+            env = FitscriptEnv(base_url=LOCAL_SERVER_URL)
+            try:
+                await run_episode(task_name, env)
+            finally:
+                env.close()
+
+
 if __name__ == "__main__":
-    asyncio.run(run_episode())
+    asyncio.run(main())
