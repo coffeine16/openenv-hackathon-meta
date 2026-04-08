@@ -65,15 +65,10 @@ app = create_app(
 )
 
 
-def main(host: str = "0.0.0.0", port: int = 8000):
-    """Entry point for direct execution."""
+def main():
     import uvicorn
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
-    main(port=args.port)
+    main()
