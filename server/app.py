@@ -36,12 +36,11 @@ except Exception as e:  # pragma: no cover
     ) from e
 
 try:
-    from ..models import FitscriptAction, FitscriptObservation
-    from .FitScript_environment import FitscriptEnvironment
-except ModuleNotFoundError:
     from models import FitscriptAction, FitscriptObservation
     from server.FitScript_environment import FitscriptEnvironment
-
+except ModuleNotFoundError:
+    from ..models import FitscriptAction, FitscriptObservation
+    from .FitScript_environment import FitscriptEnvironment
 
 # Read the task from the environment variable; default to basic_plan
 FITSCRIPT_TASK = os.environ.get("FITSCRIPT_TASK", "basic_plan")
